@@ -12,11 +12,13 @@ import {
   dropItem,
   calculateEscapeValue,
   interact,
+  rewindToStep,
 } from '../engine/gameEngine';
 import { GameBoard } from '../components/GameBoard';
 import { StatusPanel } from '../components/StatusPanel';
 import { InventoryPanel } from '../components/InventoryPanel';
 import { ControlPanel } from '../components/ControlPanel';
+import { EchoHourglassPanel } from '../components/EchoHourglassPanel';
 import {
   saveExpeditionRecord,
   getTotalGold,
@@ -86,6 +88,10 @@ export const GamePage: React.FC = () => {
 
   const handleInteract = useCallback(() => {
     setGame((prev) => interact(prev));
+  }, []);
+
+  const handleRewind = useCallback((stepIndex: number) => {
+    setGame((prev) => rewindToStep(prev, stepIndex));
   }, []);
 
   const handleRestart = useCallback(() => {
@@ -378,12 +384,21 @@ export const GamePage: React.FC = () => {
             </button>
           </div>
 
-          <InventoryPanel
-            inventory={game.player.inventory}
-            onAppraise={handleAppraise}
-            onDrop={handleDrop}
-            canAppraise={canAppraise}
-          />
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
+            <EchoHourglassPanel
+              echoHourglass={game.echoHourglass}
+              currentCurse={game.player.curse}
+              maxCurse={game.player.maxCurse}
+              onRewind={handleRewind}
+              disabled={game.status === 'victory' || game.status === 'defeat'}
+            />
+            <InventoryPanel
+              inventory={game.player.inventory}
+              onAppraise={handleAppraise}
+              onDrop={handleDrop}
+              canAppraise={canAppraise}
+            />
+          </div>
         </div>
 
         {(game.status === 'victory' || game.status === 'defeat') && (

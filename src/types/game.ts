@@ -11,6 +11,39 @@ export type TileType =
   | 'torch'
   | 'chest';
 
+export type EchoActionType = 'move' | 'pickup' | 'hurt' | 'door' | 'rest' | 'interact';
+
+export interface EchoStep {
+  id: string;
+  turn: number;
+  actionType: EchoActionType;
+  description: string;
+  timestamp: number;
+}
+
+export interface EchoSnapshot {
+  player: PlayerState;
+  room: RoomState;
+  status: 'exploring' | 'escaping' | 'victory' | 'defeat';
+  turn: number;
+}
+
+export interface EchoCreature {
+  id: string;
+  position: Position;
+  spawnTurn: number;
+  damage: number;
+}
+
+export interface EchoHourglassState {
+  history: EchoStep[];
+  snapshots: EchoSnapshot[];
+  echoCreatures: EchoCreature[];
+  usageCount: number;
+  maxHistory: number;
+  rewindCost: number;
+}
+
 export type Direction = 'up' | 'down' | 'left' | 'right';
 
 export interface Position {
@@ -113,6 +146,7 @@ export interface GameState {
   turn: number;
   message: string;
   escapeValue: number;
+  echoHourglass: EchoHourglassState;
 }
 
 export interface RoomTemplate {

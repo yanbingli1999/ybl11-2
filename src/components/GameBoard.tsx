@@ -79,6 +79,13 @@ export const GameBoard: React.FC<GameBoardProps> = ({ game }) => {
       return <span style={{ zIndex: 10 }}>🧙</span>;
     }
 
+    const echoCreature = game.echoHourglass?.echoCreatures?.find(
+      (c) => c.position.x === x && c.position.y === y
+    );
+    if (echoCreature && tile.visible) {
+      return <span style={{ zIndex: 5, filter: 'drop-shadow(0 0 4px #a855f7)' }}>👻</span>;
+    }
+
     if (!tile.visible && !tile.explored) {
       return null;
     }

@@ -6,10 +6,265 @@ import {
   Position,
   Tile,
   InventoryItem,
+  EchoSnapshot,
+  EchoStep,
+  EchoActionType,
+  EchoCreature,
+  EchoHourglassState,
 } from '../types/game';
 import { generateRoomTemplate, TUTORIAL_ROOM } from '../data/rooms';
 import { getRandomRelic, RELICS } from '../data/relics';
 import { TRAPS, getRandomTrapType } from '../data/traps';
+
+const MAX_HISTORY = 8;
+const REWIND_COST = 20;
+const ECHO_CREATURE_DAMAGE = 10;
+
+function createInitialEchoHourglass(): EchoHourglassState {
+  return {
+    history: [],
+    snapshots: [],
+    echoCreatures: [],
+    usageCount: 0,
+    maxHistory: MAX_HISTORY,
+    rewindCost: REWIND_COST,
+  };
+}
+
+function createSnapshot(game: GameState): EchoSnapshot {
+  return {
+    player: deepClone(game.player),
+    room: deepClone(game.room),
+    status: game.status,
+    turn: game.turn,
+  };
+}
+
+function recordEchoStep(
+  game: GameState,
+  actionType: EchoActionType,
+  description: string
+): void {
+  const snapshot = createSnapshot(game);
+  const step: EchoStep = {
+    id: `echo_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+    turn: game.turn,
+    actionType,
+    description,
+    timestamp: Date.now(),
+  };
+
+  game.echoHourglass.snapshots.unshift(snapshot);
+  game.echoHourglass.history.unshift(step);
+
+  if (game.echoHourglass.snapshots.length > MAX_HISTORY) {
+    game.echoHourglass.snapshots.pop();
+  }
+  if (game.echoHourglass.history.length > MAX_HISTORY) {
+    game.echoHourglass.history.pop();
+  }
+}
+
+function preserveAppraisedItems(
+  fromPlayer: PlayerState,
+  toPlayer: PlayerState
+): void {
+  const appraisedMap = new Map<string, { isGenuine: boolean }>();
+  for (const item of fromPlayer.inventory) {
+    if (item.appraised) {
+      appraisedMap.set(item.relicId, { isGenuine: item.isGenuine as boolean });
+    }
+  }
+  for (const item of toPlayer.inventory) {
+    const preserved = appraisedMap.get(item.relicId);
+    if (preserved) {
+      item.appraised = true;
+      item.isGenuine = preserved.isGenuine;
+    }
+  }
+}
+
+function spawnEchoCreature(game: GameState): void {
+  const { room, player } = game;
+  let spawnPos: Position | null = null;
+
+  const directions = [
+    { dx: -2, dy: 0 },
+    { dx: 2, dy: 0 },
+    { dx: 0, dy: -2 },
+    { dx: 0, dy: 2 },
+    { dx: -2, dy: -2 },
+    { dx: 2, dy: -2 },
+    { dx: -2, dy: 2 },
+    { dx: 2, dy: 2 },
+  ];
+
+  for (let attempt = 0; attempt < 20; attempt++) {
+    const randX = Math.floor(Math.random() * room.width);
+    const randY = Math.floor(Math.random() * room.height);
+    const tile = room.tiles[randY]?.[randX];
+    if (
+      tile &&
+      tile.type !== 'wall' &&
+      tile.type !== 'stone' &&
+      !(randX === player.position.x && randY === player.position.y)
+    ) {
+      const dist = Math.sqrt(
+        Math.pow(randX - player.position.x, 2) +
+          Math.pow(randY - player.position.y, 2)
+      );
+      if (dist >= 3) {
+        spawnPos = { x: randX, y: randY };
+        break;
+      }
+    }
+  }
+
+  if (!spawnPos) {
+    for (const dir of directions) {
+      const nx = player.position.x + dir.dx;
+      const ny = player.position.y + dir.dy;
+      const tile = room.tiles[ny]?.[nx];
+      if (tile && tile.type !== 'wall' && tile.type !== 'stone') {
+        spawnPos = { x: nx, y: ny };
+        break;
+      }
+    }
+  }
+
+  if (spawnPos) {
+    const creature: EchoCreature = {
+      id: `echo_creature_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+      position: spawnPos,
+      spawnTurn: game.turn,
+      damage: ECHO_CREATURE_DAMAGE,
+    };
+    game.echoHourglass.echoCreatures.push(creature);
+    game.message = `⚠️ 回声怪从时间裂缝中现身！它正在追踪你...`;
+  }
+}
+
+function moveEchoCreatures(game: GameState): void {
+  const { room, player } = game;
+  const creaturesToRemove: string[] = [];
+
+  for (const creature of game.echoHourglass.echoCreatures) {
+    if (
+      creature.position.x === player.position.x &&
+      creature.position.y === player.position.y
+    ) {
+      game.player.stamina -= creature.damage;
+      game.message = `💀 回声怪袭击了你！受到${creature.damage}点伤害。`;
+      creaturesToRemove.push(creature.id);
+      continue;
+    }
+
+    const dx = player.position.x - creature.position.x;
+    const dy = player.position.y - creature.position.y;
+    const steps: Position[] = [];
+
+    if (Math.abs(dx) > Math.abs(dy)) {
+      steps.push({ x: creature.position.x + Math.sign(dx), y: creature.position.y });
+      steps.push({ x: creature.position.x, y: creature.position.y + Math.sign(dy) });
+    } else {
+      steps.push({ x: creature.position.x, y: creature.position.y + Math.sign(dy) });
+      steps.push({ x: creature.position.x + Math.sign(dx), y: creature.position.y });
+    }
+
+    for (const step of steps) {
+      if (
+        step.x < 0 ||
+        step.x >= room.width ||
+        step.y < 0 ||
+        step.y >= room.height
+      )
+        continue;
+      const tile = room.tiles[step.y][step.x];
+      if (tile.type === 'wall' || tile.type === 'stone') continue;
+      if (tile.type === 'door' && !tile.activated) continue;
+
+      const occupied = game.echoHourglass.echoCreatures.some(
+        (c) =>
+          c.id !== creature.id &&
+          c.position.x === step.x &&
+          c.position.y === step.y
+      );
+      if (occupied) continue;
+
+      creature.position = step;
+      break;
+    }
+
+    if (
+      creature.position.x === player.position.x &&
+      creature.position.y === player.position.y
+    ) {
+      game.player.stamina -= creature.damage;
+      creaturesToRemove.push(creature.id);
+      if (!game.message.includes('回声怪袭击了你')) {
+        game.message = `💀 回声怪袭击了你！受到${creature.damage}点伤害。`;
+      }
+    }
+  }
+
+  game.echoHourglass.echoCreatures = game.echoHourglass.echoCreatures.filter(
+    (c) => !creaturesToRemove.includes(c.id)
+  );
+}
+
+export function rewindToStep(game: GameState, stepIndex: number): GameState {
+  if (game.status !== 'exploring' && game.status !== 'escaping') return game;
+  if (stepIndex < 0 || stepIndex >= game.echoHourglass.snapshots.length) return game;
+
+  const snapshot = game.echoHourglass.snapshots[stepIndex];
+  if (!snapshot) return game;
+
+  const curseCost = REWIND_COST;
+  if (game.player.curse + curseCost > game.player.maxCurse) {
+    const newGame = deepClone(game);
+    newGame.message = '诅咒值不足，无法使用回声沙漏回溯时间！';
+    return newGame;
+  }
+
+  const newGame = deepClone(game);
+  const currentPlayer = newGame.player;
+
+  newGame.player = deepClone(snapshot.player);
+  newGame.room = deepClone(snapshot.room);
+  newGame.status = snapshot.status;
+  newGame.turn = snapshot.turn;
+
+  newGame.player.curse = currentPlayer.curse + curseCost;
+
+  preserveAppraisedItems(currentPlayer, newGame.player);
+
+  newGame.echoHourglass.usageCount += 1;
+
+  if (newGame.echoHourglass.usageCount >= 2) {
+    spawnEchoCreature(newGame);
+    if (newGame.echoHourglass.usageCount >= 3) {
+      spawnEchoCreature(newGame);
+    }
+  }
+
+  newGame.echoHourglass.history = newGame.echoHourglass.history.slice(stepIndex);
+  newGame.echoHourglass.snapshots = newGame.echoHourglass.snapshots.slice(stepIndex);
+
+  const stepInfo = newGame.echoHourglass.history[0];
+  if (stepInfo) {
+    newGame.message = `⏳ 回声沙漏激活！消耗${curseCost}诅咒，回溯到第${stepInfo.turn}回合：${stepInfo.description}`;
+  } else {
+    newGame.message = `⏳ 回声沙漏激活！消耗${curseCost}诅咒，时间已回溯。`;
+  }
+
+  if (newGame.player.curse >= newGame.player.maxCurse) {
+    newGame.status = 'defeat';
+    newGame.message = '诅咒侵蚀了你的灵魂...';
+  }
+
+  updateVisibility(newGame);
+  return newGame;
+}
 
 export function createInitialPlayer(): PlayerState {
   return {
@@ -118,8 +373,9 @@ export function createInitialGame(): GameState {
     room,
     status: 'exploring',
     turn: 0,
-    message: '欢迎来到遗迹！方向键/WASD移动，空格互动。提示：推石头🪨到机关🔘上开门🔒',
+    message: '欢迎来到遗迹！方向键/WASD移动，空格互动。提示：推石头🪨到机关🔘上开门🔒。使用回声沙漏⏳可消耗诅咒回溯时间！',
     escapeValue: 0,
+    echoHourglass: createInitialEchoHourglass(),
   };
 
   updateVisibility(game);
@@ -127,6 +383,9 @@ export function createInitialGame(): GameState {
 }
 
 export function createGameFromSaved(saved: GameState): GameState {
+  if (!saved.echoHourglass) {
+    saved.echoHourglass = createInitialEchoHourglass();
+  }
   updateVisibility(saved);
   return saved;
 }
@@ -177,6 +436,13 @@ export function movePlayer(game: GameState, direction: Direction): GameState {
     }
   }
 
+  const dirNames: Record<Direction, string> = {
+    up: '上',
+    down: '下',
+    left: '左',
+    right: '右',
+  };
+
   if (targetTile.type === 'stone') {
     const stoneNewPos = {
       x: newPos.x + offset.x,
@@ -221,7 +487,9 @@ export function movePlayer(game: GameState, direction: Direction): GameState {
         plateMechanism.activated = true;
         const targetDoorId = plateMechanism.linkedDoorId;
         const targetDoor = newGame.room.doors.find(d => d.doorId === targetDoorId);
+        const doorsBefore = newGame.room.doors.filter(d => d.doorId === targetDoorId).length;
         openLinkedDoor(newGame, targetDoorId);
+        recordEchoStep(newGame, 'door', `推动石头激活机关，开启了门[${targetDoorId}]`);
         if (targetDoor) {
           newGame.message = `🪨 石头压住了机关🔘，对应的门🚪(x=${targetDoor.position.x},y=${targetDoor.position.y})打开了！`;
         } else {
@@ -247,13 +515,40 @@ export function movePlayer(game: GameState, direction: Direction): GameState {
     };
   }
 
+  const oldPos = { ...newGame.player.position };
   newGame.player.position = newPos;
   newGame.player.stamina -= 1;
   newGame.turn += 1;
 
+  recordEchoStep(
+    newGame,
+    'move',
+    `向${dirNames[direction]}移动: (${oldPos.x},${oldPos.y}) → (${newPos.x},${newPos.y})`
+  );
+
+  const staminaBefore = newGame.player.stamina;
   checkTrap(newGame);
+  if (newGame.player.stamina < staminaBefore) {
+    recordEchoStep(
+      newGame,
+      'hurt',
+      `触发陷阱，受到${staminaBefore - newGame.player.stamina}点伤害`
+    );
+  }
+
+  const inventoryBefore = newGame.player.inventory.length;
   checkRelic(newGame);
+  if (newGame.player.inventory.length > inventoryBefore) {
+    const lastItem = newGame.player.inventory[newGame.player.inventory.length - 1];
+    recordEchoStep(
+      newGame,
+      'pickup',
+      `拾取文物: ${lastItem.name}`
+    );
+  }
+
   checkEntranceExit(newGame);
+  moveEchoCreatures(newGame);
   updateVisibility(newGame);
 
   if (newGame.player.stamina <= 0) {
@@ -466,6 +761,10 @@ export function nextFloor(game: GameState): GameState {
     newGame.player.stamina + 20
   );
 
+  newGame.echoHourglass.history = [];
+  newGame.echoHourglass.snapshots = [];
+  newGame.echoHourglass.echoCreatures = [];
+
   newGame.message = `进入第 ${newGame.player.depth} 层！体力恢复了一些。`;
   newGame.turn += 1;
 
@@ -533,6 +832,13 @@ export function interact(game: GameState): GameState {
     if (plateMechanism) {
       plateMechanism.activated = true;
       openLinkedDoor(newGame, plateMechanism.linkedDoorId);
+      newGame.turn += 1;
+      recordEchoStep(
+        newGame,
+        'door',
+        `踩下机关[${plateMechanism.id}]，开启了门[${plateMechanism.linkedDoorId}]`
+      );
+      moveEchoCreatures(newGame);
       newGame.message = '🔘 你踩下了机关，对应的门打开了！';
       updateVisibility(newGame);
       return newGame;
@@ -680,12 +986,21 @@ export function rest(game: GameState): GameState {
   );
   newGame.turn += 3;
 
+  let cursed = false;
   if (Math.random() < 0.1) {
     newGame.player.curse += 5;
+    cursed = true;
     newGame.message = '休息时感到一股寒意...诅咒增加了5点。';
   } else {
     newGame.message = '休息片刻，恢复了20点体力。';
   }
+
+  recordEchoStep(
+    newGame,
+    'rest',
+    `休息3回合，恢复20体力${cursed ? '，诅咒增加5' : ''}`
+  );
+  moveEchoCreatures(newGame);
 
   return newGame;
 }
