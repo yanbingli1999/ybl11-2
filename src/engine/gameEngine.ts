@@ -28,6 +28,7 @@ function createInitialEchoHourglass(): EchoHourglassState {
     usageCount: 0,
     maxHistory: MAX_HISTORY,
     rewindCost: REWIND_COST,
+    appraisedRelicRegistry: {},
   };
 }
 
@@ -62,6 +63,24 @@ function recordEchoStep(
   }
   if (game.echoHourglass.history.length > MAX_HISTORY) {
     game.echoHourglass.history.pop();
+  }
+}
+
+function registerAppraisedRelic(
+  game: GameState,
+  relicId: string,
+  isGenuine: boolean
+): void {
+  game.echoHourglass.appraisedRelicRegistry[relicId] = isGenuine;
+}
+
+function applyRegistryToInventory(game: GameState): void {
+  const registry = game.echoHourglass.appraisedRelicRegistry;
+  for (const item of game.player.inventory) {
+    if (!item.appraised && registry[item.relicId] !== undefined) {
+      item.appraised = true;
+      item.isGenuine = registry[item.relicId];
+    }
   }
 }
 
@@ -228,6 +247,8 @@ export function rewindToStep(game: GameState, stepIndex: number): GameState {
 
   const newGame = deepClone(game);
   const currentPlayer = newGame.player;
+  const preservedRegistry = deepClone(newGame.echoHourglass.appraisedRelicRegistry);
+  const preservedCreatures = deepClone(newGame.echoHourglass.echoCreatures);
 
   newGame.player = deepClone(snapshot.player);
   newGame.room = deepClone(snapshot.room);
@@ -236,7 +257,9 @@ export function rewindToStep(game: GameState, stepIndex: number): GameState {
 
   newGame.player.curse = currentPlayer.curse + curseCost;
 
-  preserveAppraisedItems(currentPlayer, newGame.player);
+  newGame.echoHourglass.appraisedRelicRegistry = preservedRegistry;
+  newGame.echoHourglass.echoCreatures = preservedCreatures;
+  applyRegistryToInventory(newGame);
 
   newGame.echoHourglass.usageCount += 1;
 
@@ -386,6 +409,9 @@ export function createGameFromSaved(saved: GameState): GameState {
   if (!saved.echoHourglass) {
     saved.echoHourglass = createInitialEchoHourglass();
   }
+  if (!saved.echoHourglass.appraisedRelicRegistry) {
+    saved.echoHourglass.appraisedRelicRegistry = {};
+  }
   updateVisibility(saved);
   return saved;
 }
@@ -443,6 +469,11 @@ export function movePlayer(game: GameState, direction: Direction): GameState {
     right: '右',
   };
 
+  const actionTags: string[] = [];
+  let openedDoorId: string | null = null;
+  let pickedUpName: string | null = null;
+  let trapDamage = 0;
+
   if (targetTile.type === 'stone') {
     const stoneNewPos = {
       x: newPos.x + offset.x,
@@ -487,9 +518,9 @@ export function movePlayer(game: GameState, direction: Direction): GameState {
         plateMechanism.activated = true;
         const targetDoorId = plateMechanism.linkedDoorId;
         const targetDoor = newGame.room.doors.find(d => d.doorId === targetDoorId);
-        const doorsBefore = newGame.room.doors.filter(d => d.doorId === targetDoorId).length;
         openLinkedDoor(newGame, targetDoorId);
-        recordEchoStep(newGame, 'door', `推动石头激活机关，开启了门[${targetDoorId}]`);
+        openedDoorId = targetDoorId;
+        actionTags.push('door');
         if (targetDoor) {
           newGame.message = `🪨 石头压住了机关🔘，对应的门🚪(x=${targetDoor.position.x},y=${targetDoor.position.y})打开了！`;
         } else {
@@ -520,32 +551,38 @@ export function movePlayer(game: GameState, direction: Direction): GameState {
   newGame.player.stamina -= 1;
   newGame.turn += 1;
 
-  recordEchoStep(
-    newGame,
-    'move',
-    `向${dirNames[direction]}移动: (${oldPos.x},${oldPos.y}) → (${newPos.x},${newPos.y})`
-  );
+  const moveDesc = `向${dirNames[direction]}移动: (${oldPos.x},${oldPos.y}) → (${newPos.x},${newPos.y})`;
 
   const staminaBefore = newGame.player.stamina;
   checkTrap(newGame);
   if (newGame.player.stamina < staminaBefore) {
-    recordEchoStep(
-      newGame,
-      'hurt',
-      `触发陷阱，受到${staminaBefore - newGame.player.stamina}点伤害`
-    );
+    trapDamage = staminaBefore - newGame.player.stamina;
+    actionTags.push('hurt');
   }
 
   const inventoryBefore = newGame.player.inventory.length;
   checkRelic(newGame);
   if (newGame.player.inventory.length > inventoryBefore) {
     const lastItem = newGame.player.inventory[newGame.player.inventory.length - 1];
-    recordEchoStep(
-      newGame,
-      'pickup',
-      `拾取文物: ${lastItem.name}`
-    );
+    pickedUpName = lastItem.name;
+    actionTags.push('pickup');
   }
+
+  let primaryAction: EchoActionType = 'move';
+  if (actionTags.includes('hurt')) primaryAction = 'hurt';
+  else if (actionTags.includes('pickup')) primaryAction = 'pickup';
+  else if (actionTags.includes('door')) primaryAction = 'door';
+
+  const descParts = [moveDesc];
+  if (openedDoorId) descParts.push(`开启门[${openedDoorId}]`);
+  if (trapDamage > 0) descParts.push(`受伤${trapDamage}点`);
+  if (pickedUpName) descParts.push(`拾取${pickedUpName}`);
+
+  recordEchoStep(
+    newGame,
+    primaryAction,
+    descParts.join(' | ')
+  );
 
   checkEntranceExit(newGame);
   moveEchoCreatures(newGame);
@@ -618,16 +655,19 @@ function checkRelic(game: GameState) {
       if (game.player.weight + relicData.weight <= game.player.maxWeight) {
         relicInstance.collected = true;
 
+        const registry = game.echoHourglass.appraisedRelicRegistry;
+        const hasRegistry = registry[relicData.id] !== undefined;
+
         const item: InventoryItem = {
           id: `inv_${Date.now()}_${Math.random()}`,
           relicId: relicData.id,
           name: relicData.name,
           weight: relicData.weight,
           value: relicData.value,
-          isGenuine: null,
+          isGenuine: hasRegistry ? registry[relicData.id] : null,
           curseLevel: relicData.curseLevel,
           icon: relicData.icon,
-          appraised: false,
+          appraised: hasRegistry,
         };
 
         game.player.inventory.push(item);
@@ -639,7 +679,12 @@ function checkRelic(game: GameState) {
           type: 'floor',
         };
 
-        game.message = `你捡到了${relicData.name}！`;
+        if (hasRegistry) {
+          const genuineText = registry[relicData.id] ? '真品' : '赝品';
+          game.message = `你捡到了${relicData.name}！（已鉴定：${genuineText}）`;
+        } else {
+          game.message = `你捡到了${relicData.name}！`;
+        }
       } else {
         game.message = `背包太满了，捡不起${relicData.name}。可按空格丢弃物品。`;
       }
@@ -942,6 +987,7 @@ export function appraiseItem(game: GameState, itemId: string): GameState {
   if (success) {
     item.appraised = true;
     item.isGenuine = relicData?.isGenuine ?? false;
+    registerAppraisedRelic(newGame, item.relicId, item.isGenuine);
     if (item.isGenuine) {
       newGame.message = `鉴定成功！${item.name} 是真品！价值 ${item.value} 金币。`;
     } else {

@@ -42,6 +42,7 @@ export interface EchoHourglassState {
   usageCount: number;
   maxHistory: number;
   rewindCost: number;
+  appraisedRelicRegistry: Record<string, boolean>;
 }
 
 export type Direction = 'up' | 'down' | 'left' | 'right';
